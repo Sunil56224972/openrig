@@ -226,38 +226,49 @@ export class FileWriteService {
   createAtomic(req: Omit<FileWriteRequest, "expectedMtime" | "expectedContentHash">): FileWriteResult {
     const target = resolveAllowedPath(this.allowlist, req.rootName, req.path);
 
-    // SECURITY FIX: The previous code had a TOCTOU race between
-    // fs.existsSync() and the later fs.linkSync(). An attacker could place
-    // a symlink at `target` in the gap, redirecting the write outside the
-    // allowlist. Replaced with fs.openSync(target, "wx") which uses the
-    // kernel O_CREAT|O_EXCL flags — the existence check and file creation
-    // happen in a single atomic syscall. No race window.
-    let targetFd: number | null = null;
+    // SECURITY FIX: The previous code had a TOCTOU race — existsSync()
+    // checked existence, then linkSync() created the file, with a gap
+    // between them where an attacker could inject a symlink.
+    //
+    // Fix: Remove the racy existsSync() check entirely. Write content to
+    // a temp file first (crash-safe: partial writes are never visible at
+    // the target path), then use linkSync() for atomic exclusive create.
+    // linkSync() fails with EEXIST at the kernel level if the target
+    // already exists — no race window, no partial files on crash.
+
+    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}-${path.basename(target)}`;
+    const tmpPath = path.join(path.dirname(target), tmpName);
+    let tmpFd: number | null = null;
     try {
-      // "wx" = O_WRONLY | O_CREAT | O_EXCL — fails with EEXIST if target
-      // already exists (including symlinks). Atomic at the kernel level.
-      targetFd = fs.openSync(target, "wx");
-      fs.writeFileSync(targetFd, req.content);
-      fs.fsyncSync(targetFd);
+      tmpFd = fs.openSync(tmpPath, "w");
+      fs.writeFileSync(tmpFd, req.content);
+      fs.fsyncSync(tmpFd);
     } catch (err) {
-      const openSucceeded = targetFd !== null;
-      try { if (targetFd !== null) fs.closeSync(targetFd); } catch { /* ignore */ }
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-        // openSync failed with EEXIST — target already exists, nothing was created.
-        throw new FileWriteError("target_exists", `refusing to overwrite existing file '${target}'`, { target });
-      }
-      // Only clean up partial file if openSync succeeded (file was created)
-      // but a subsequent writeFileSync/fsyncSync failed.
-      if (openSucceeded) {
-        try { fs.unlinkSync(target); } catch { /* ignore */ }
-      }
+      try { if (tmpFd !== null) fs.closeSync(tmpFd); } catch { /* ignore */ }
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
       throw new FileWriteError(
         "tmp_write_failed",
-        `failed to write+fsync '${target}': ${err instanceof Error ? err.message : String(err)}`,
-        { target },
+        `failed to write+fsync temp file at '${tmpPath}': ${err instanceof Error ? err.message : String(err)}`,
+        { target, tmpPath },
       );
     } finally {
-      try { if (targetFd !== null) fs.closeSync(targetFd); } catch { /* ignore */ }
+      try { if (tmpFd !== null) fs.closeSync(tmpFd); } catch { /* ignore */ }
+    }
+
+    try {
+      // linkSync is atomic at the kernel level: it fails with EEXIST if
+      // target already exists (including symlinks). No separate existence
+      // check needed — this IS the check + create in one syscall.
+      fs.linkSync(tmpPath, target);
+      fs.unlinkSync(tmpPath);
+    } catch (err) {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      const code = (err as NodeJS.ErrnoException).code === "EEXIST" ? "target_exists" : "rename_failed";
+      throw new FileWriteError(
+        code,
+        `failed to atomically create '${target}': ${err instanceof Error ? err.message : String(err)}`,
+        { target, tmpPath },
+      );
     }
 
     const newStat = fs.statSync(target);
