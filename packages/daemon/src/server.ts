@@ -839,6 +839,10 @@ export function createApp(deps: AppDeps): Hono {
       return c.notFound();
     }
 
+    // SECURITY FIX: Set CSP header on ALL UI responses (both static assets
+    // and SPA index.html fallback) to block inline script injection.
+    c.header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:;");
+
     const requestedFile = safeResolveUiPath(uiDistDir, requestPath);
     if (requestedFile && fs.existsSync(requestedFile) && fs.statSync(requestedFile).isFile()) {
       return fileResponse(requestedFile);
@@ -852,8 +856,7 @@ export function createApp(deps: AppDeps): Hono {
     // SECURITY FIX: Removed inline <script> that embedded the terminal
     // bearer token in every HTML response (exposed to network observers,
     // XSS, browser extensions). Token now served via authenticated
-    // /api/terminal-token endpoint. CSP blocks inline script injection.
-    c.header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:;");
+    // /api/terminal-token endpoint.
     return c.html(indexHtml);
   });
 

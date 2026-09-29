@@ -240,13 +240,16 @@ export class FileWriteService {
       fs.writeFileSync(targetFd, req.content);
       fs.fsyncSync(targetFd);
     } catch (err) {
+      const openSucceeded = targetFd !== null;
       try { if (targetFd !== null) fs.closeSync(targetFd); } catch { /* ignore */ }
-      // Clean up partial file on write failure (but not on EEXIST — nothing was created).
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
-        try { fs.unlinkSync(target); } catch { /* ignore */ }
-      }
       if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        // openSync failed with EEXIST — target already exists, nothing was created.
         throw new FileWriteError("target_exists", `refusing to overwrite existing file '${target}'`, { target });
+      }
+      // Only clean up partial file if openSync succeeded (file was created)
+      // but a subsequent writeFileSync/fsyncSync failed.
+      if (openSucceeded) {
+        try { fs.unlinkSync(target); } catch { /* ignore */ }
       }
       throw new FileWriteError(
         "tmp_write_failed",
