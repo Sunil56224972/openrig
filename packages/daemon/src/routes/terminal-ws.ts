@@ -1,6 +1,6 @@
 import type { Hono } from "hono";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import * as crypto from "node:crypto";
+import { constantTimeEqual } from "../middleware/auth-bearer-token.js";
 import {
   TerminalBrokerRegistry,
   type BrokerTmux,
@@ -8,10 +8,10 @@ import {
   type TerminalSubscriber,
 } from "../terminal/TerminalSessionBroker.js";
 
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
+// SECURITY FIX: Removed local constantTimeEqual that leaked token length
+// via early return on length mismatch (timing side-channel). Now imports
+// the hardened version from auth-bearer-token.ts which runs a fixed-cost
+// timingSafeEqual on BOTH code paths (equal and unequal length).
 
 const MAX_EARLY_TERMINAL_FRAMES = 32;
 const MAX_EARLY_TERMINAL_FRAME_BYTES = 256 * 1024;

@@ -116,6 +116,7 @@ import { telemetryRoutes } from "./routes/telemetry.js";
 import { proofRoutes } from "./routes/proof.js";
 import { scopeApproveRoutes } from "./routes/scope-approve.js";
 import { registerTerminalWs } from "./routes/terminal-ws.js";
+import { authBearerTokenMiddleware } from "./middleware/auth-bearer-token.js";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { steeringRoutes } from "./routes/steering.js";
 import { healthSummaryRoutes } from "./routes/health-summary.js";
@@ -727,6 +728,18 @@ export function createApp(deps: AppDeps): Hono {
     _lastInjectWebSocket = injectWebSocket;
     registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null });
   }
+
+  // SECURITY FIX: Serve the terminal bearer token from a dedicated endpoint
+  // protected by authBearerTokenMiddleware. Previously the token was embedded
+  // in every HTML page. This endpoint requires the same bearer auth as
+  // transport/compaction routes — unauthenticated callers get 401.
+  app.get("/api/terminal-token",
+    authBearerTokenMiddleware({ expectedToken: deps.missionControlBearerToken ?? null }),
+    async (c) => {
+      return c.json({ token: deps.terminalBearerToken ?? null });
+    },
+  );
+
   app.route("/api/activity", activityRoutes);
   app.route("/api/ask", askRoutes);
   app.route("/api/wake-resolve", wakeResolveRoutes);
@@ -836,11 +849,12 @@ export function createApp(deps: AppDeps): Hono {
     }
 
     const indexHtml = fs.readFileSync(uiIndexPath, "utf-8");
-    const tokenScript = deps.terminalBearerToken
-      ? `<script>if(!window.localStorage.getItem("openrig.terminalBearerToken"))window.localStorage.setItem("openrig.terminalBearerToken",${JSON.stringify(deps.terminalBearerToken)})</script>`
-      : "";
-    const injected = tokenScript ? indexHtml.replace("</head>", `${tokenScript}</head>`) : indexHtml;
-    return c.html(injected);
+    // SECURITY FIX: Removed inline <script> that embedded the terminal
+    // bearer token in every HTML response (exposed to network observers,
+    // XSS, browser extensions). Token now served via authenticated
+    // /api/terminal-token endpoint. CSP blocks inline script injection.
+    c.header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:;");
+    return c.html(indexHtml);
   });
 
   return app;

@@ -3,6 +3,11 @@ import { ulid } from "ulid";
 import type { ExecFn } from "../adapters/tmux.js";
 import type { RuntimeVerification, RuntimeStatus } from "./bootstrap-types.js";
 
+/** Shell-quote a string (POSIX single-quote). Mirrors tmux.ts. */
+function shellQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\"'\"'") + "'";
+}
+
 interface RuntimeVerifierDeps {
   exec: ExecFn;
   db: Database.Database;
@@ -137,13 +142,14 @@ export class RuntimeVerifier {
   private async verifyVersionOrHelp(binary: string, canonicalName: string): Promise<RuntimeVerification> {
     // Try --version first
     try {
-      const output = await this.exec(`${binary} --version`);
+      // SECURITY FIX: shell-quote binary to prevent command injection.
+      const output = await this.exec(`${shellQuote(binary)} --version`);
       const version = this.parseVersion(output);
       return this.buildVerification(canonicalName, "verified", version ?? null, null, null);
     } catch {
       // Fall back to --help
       try {
-        await this.exec(`${binary} --help`);
+        await this.exec(`${shellQuote(binary)} --help`);
         return this.buildVerification(canonicalName, "verified", null, null, null);
       } catch {
         return this.buildVerification(canonicalName, "not_found", null, null, `${binary} not found`);

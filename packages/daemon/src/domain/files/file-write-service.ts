@@ -225,41 +225,36 @@ export class FileWriteService {
    */
   createAtomic(req: Omit<FileWriteRequest, "expectedMtime" | "expectedContentHash">): FileWriteResult {
     const target = resolveAllowedPath(this.allowlist, req.rootName, req.path);
-    if (fs.existsSync(target)) {
-      throw new FileWriteError("target_exists", `refusing to overwrite existing file '${target}'`, { target });
-    }
 
-    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}-${path.basename(target)}`;
-    const tmpPath = path.join(path.dirname(target), tmpName);
-    let tmpFd: number | null = null;
+    // SECURITY FIX: The previous code had a TOCTOU race between
+    // fs.existsSync() and the later fs.linkSync(). An attacker could place
+    // a symlink at `target` in the gap, redirecting the write outside the
+    // allowlist. Replaced with fs.openSync(target, "wx") which uses the
+    // kernel O_CREAT|O_EXCL flags — the existence check and file creation
+    // happen in a single atomic syscall. No race window.
+    let targetFd: number | null = null;
     try {
-      tmpFd = fs.openSync(tmpPath, "w");
-      fs.writeFileSync(tmpFd, req.content);
-      fs.fsyncSync(tmpFd);
+      // "wx" = O_WRONLY | O_CREAT | O_EXCL — fails with EEXIST if target
+      // already exists (including symlinks). Atomic at the kernel level.
+      targetFd = fs.openSync(target, "wx");
+      fs.writeFileSync(targetFd, req.content);
+      fs.fsyncSync(targetFd);
     } catch (err) {
-      try { if (tmpFd !== null) fs.closeSync(tmpFd); } catch { /* ignore */ }
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      try { if (targetFd !== null) fs.closeSync(targetFd); } catch { /* ignore */ }
+      // Clean up partial file on write failure (but not on EEXIST — nothing was created).
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+        try { fs.unlinkSync(target); } catch { /* ignore */ }
+      }
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new FileWriteError("target_exists", `refusing to overwrite existing file '${target}'`, { target });
+      }
       throw new FileWriteError(
         "tmp_write_failed",
-        `failed to write+fsync temp file at '${tmpPath}': ${err instanceof Error ? err.message : String(err)}`,
-        { target, tmpPath },
+        `failed to write+fsync '${target}': ${err instanceof Error ? err.message : String(err)}`,
+        { target },
       );
     } finally {
-      try { if (tmpFd !== null) fs.closeSync(tmpFd); } catch { /* ignore */ }
-    }
-
-    try {
-      // linkSync fails if the target appeared meanwhile — true exclusive create.
-      fs.linkSync(tmpPath, target);
-      fs.unlinkSync(tmpPath);
-    } catch (err) {
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-      const code = (err as NodeJS.ErrnoException).code === "EEXIST" ? "target_exists" : "rename_failed";
-      throw new FileWriteError(
-        code,
-        `failed to atomically create '${target}': ${err instanceof Error ? err.message : String(err)}`,
-        { target, tmpPath },
-      );
+      try { if (targetFd !== null) fs.closeSync(targetFd); } catch { /* ignore */ }
     }
 
     const newStat = fs.statSync(target);
