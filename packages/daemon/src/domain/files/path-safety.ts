@@ -150,9 +150,35 @@ export function resolveAllowedPath(
   try {
     realpath = fs.realpathSync(candidate);
   } catch {
-    // If the candidate doesn't exist on disk yet, fall back to the
-    // unresolved candidate. Subsequent stat will surface the absence
-    // with a more specific error code.
+    // The leaf file doesn't exist yet (e.g. createAtomic path). Walk every
+    // existing intermediate directory and reject any symlink that escapes
+    // the allowlist root — without this check the string-based containment
+    // test below passes, but the kernel follows the symlink during I/O.
+    const relSegments = path.relative(root.canonicalPath, candidate).split(path.sep);
+    let checkPath = root.canonicalPath;
+    for (const seg of relSegments.slice(0, -1)) {
+      checkPath = path.join(checkPath, seg);
+      try {
+        const lstat = fs.lstatSync(checkPath);
+        if (lstat.isSymbolicLink()) {
+          let linkTarget: string;
+          try { linkTarget = fs.realpathSync(checkPath); } catch { linkTarget = fs.readlinkSync(checkPath); }
+          const rootPrefix = root.canonicalPath.endsWith(path.sep)
+            ? root.canonicalPath
+            : `${root.canonicalPath}${path.sep}`;
+          if (linkTarget !== root.canonicalPath && !linkTarget.startsWith(rootPrefix)) {
+            throw new FilePathSafetyError(
+              "path_escape",
+              `intermediate directory '${checkPath}' is a symlink to '${linkTarget}' which falls outside allowlist root '${rootName}' (${root.canonicalPath}).`,
+              { rootName, relativePath, resolved: linkTarget, rootCanonical: root.canonicalPath },
+            );
+          }
+        }
+      } catch (e) {
+        if (e instanceof FilePathSafetyError) throw e;
+        // Intermediate dir doesn't exist yet — nothing to follow, safe
+      }
+    }
     realpath = candidate;
   }
   // Containment check with path.sep boundary to avoid the
