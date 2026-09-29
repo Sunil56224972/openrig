@@ -72,6 +72,18 @@ interface ClientPair {
 // field on the add body is rejected loudly BEFORE any write.
 const SECRET_SHAPED_FIELDS = ["bearer_value", "bearer_token", "token", "secret", "password"];
 
+
+// Guard: reject link-local and cloud-metadata addresses before any outbound
+// fetch(). RFC-1918 / loopback targets are intentional (home-network and
+// tailnet pairing), but 169.254.x (cloud metadata) and fe80:: (link-local)
+// are never legitimate remote daemon endpoints.
+const LINK_LOCAL_PATTERNS: RegExp[] = [
+  /^169\.254\./, /^fe80:/i,
+];
+
+function isLinkLocalOrMetadataHost(hostname: string): boolean {
+  return LINK_LOCAL_PATTERNS.some((r) => r.test(hostname.toLowerCase()));
+}
 function deriveHostId(url: URL): string {
   const raw = url.hostname.toLowerCase().replace(/[^a-z0-9.-]/g, "-").replace(/\./g, "-");
   return raw.replace(/^-+|-+$/g, "") || "paired-host";
@@ -254,6 +266,16 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       return c.json({ error: "pair_url_invalid", message: `'${rawUrl}' is not a usable address` }, 400);
     }
     const targetBase = target.origin;
+
+    // Guard: reject link-local and cloud-metadata targets before any outbound
+    // request. 169.254.x (cloud metadata) and fe80:: (link-local) are never
+    // legitimate remote daemon endpoints.
+    if (isLinkLocalOrMetadataHost(target.hostname)) {
+      return c.json({
+        error: "pair_target_link_local",
+        message: `target '${target.hostname}' is a link-local or cloud-metadata address; pairing targets must be reachable remote daemons.`,
+      }, 400);
+    }
 
     // B1 fixback (guard code-review 2026-07-07): PREFLIGHT before the
     // target is contacted. The candidate entry runs the SAME validation
