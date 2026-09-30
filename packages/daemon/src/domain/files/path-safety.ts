@@ -162,7 +162,7 @@ export function resolveAllowedPath(
         const lstat = fs.lstatSync(checkPath);
         if (lstat.isSymbolicLink()) {
           let linkTarget: string;
-          try { linkTarget = fs.realpathSync(checkPath); } catch { linkTarget = fs.readlinkSync(checkPath); }
+          try { linkTarget = fs.realpathSync(checkPath); } catch { linkTarget = path.resolve(path.dirname(checkPath), fs.readlinkSync(checkPath)); }
           const rootPrefix = root.canonicalPath.endsWith(path.sep)
             ? root.canonicalPath
             : `${root.canonicalPath}${path.sep}`;

@@ -137,6 +137,32 @@ describe("UI Enhancement Pack v0 — resolveAllowedPath", () => {
     expect(() => resolveAllowedPath(allowlist, "workspace-other", "leak.md"))
       .toThrowError(/'workspace-other' is not configured/);
   });
+
+  // ---- intermediate-symlink tests (new-file / createAtomic path) ----
+
+  it("rejects new file under a symlinked directory that points OUTSIDE the root", () => {
+    // A symlink inside workspace/ pointing to outside-root/.
+    symlinkSync(join(tempDir, "outside-root"), join(tempDir, "workspace", "escape-dir"));
+    // The leaf file does NOT exist — triggers the realpathSync catch fallback.
+    expect(() => resolveAllowedPath(allowlist, "workspace", "escape-dir/newfile.txt"))
+      .toThrowError(/falls outside allowlist root/);
+    try { resolveAllowedPath(allowlist, "workspace", "escape-dir/newfile.txt"); }
+    catch (e) { expect((e as FilePathSafetyError).code).toBe("path_escape"); }
+  });
+
+  it("allows new file under a symlinked directory that points INSIDE the root", () => {
+    // A symlink inside workspace/ pointing to workspace/subdir (inside the root).
+    symlinkSync(join(tempDir, "workspace", "subdir"), join(tempDir, "workspace", "internal-link"));
+    // The leaf file does NOT exist, but the symlink stays within the root — should resolve.
+    const resolved = resolveAllowedPath(allowlist, "workspace", "internal-link/newfile.txt");
+    expect(resolved).toContain("internal-link");
+  });
+
+  it("allows a new file in a nested directory that does not exist yet", () => {
+    // No symlinks, just a non-existent nested path — should resolve without error.
+    const resolved = resolveAllowedPath(allowlist, "workspace", "brand-new-dir/deep/newfile.txt");
+    expect(resolved).toContain("brand-new-dir");
+  });
 });
 
 describe("UI Enhancement Pack v0 — resolveAllowedFile / resolveAllowedDirectory", () => {
