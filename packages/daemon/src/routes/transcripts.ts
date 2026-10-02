@@ -196,6 +196,23 @@ export function transcriptRoutes(): Hono {
       return c.json({ error: "Missing required query parameter: pattern" }, 400);
     }
 
+    // Security: reject patterns with nested quantifiers before compilation.
+    // Nested quantifiers like (a+)+, (.*a){25}, or ([a-z]+)* cause exponential
+    // backtracking in JavaScript's regex engine. Because grepSync runs on the
+    // main thread without a timeout, a single malicious pattern would freeze
+    // the daemon's event loop indefinitely — a complete denial of service.
+    // See CWE-1333 (Inefficient Regular Expression Complexity).
+    if (isReDoSRisk(pattern)) {
+      return c.json(
+        {
+          error: "Regex rejected: the pattern contains nested quantifiers that risk " +
+            "catastrophic backtracking. Use a simpler pattern without nested " +
+            "repetition groups (e.g., avoid (a+)+, (.*a){n}, ([x]+)*).",
+        },
+        400,
+      );
+    }
+
     // Pre-validate regex
     try {
       new RegExp(pattern);
@@ -294,4 +311,38 @@ export function transcriptRoutes(): Hono {
   });
 
   return router;
+}
+
+/**
+ * Heuristic detection of regular expression patterns that risk catastrophic
+ * backtracking (ReDoS). Returns true when the pattern contains a quantified
+ * group whose body also contains a quantifier — the classic nested-quantifier
+ * structure (e.g., `(a+)+`, `(.*a){5}`, `([a-z]+)*`) that makes JavaScript's
+ * backtracking NFA engine enter exponential states.
+ *
+ * This is a conservative check: it may reject some safe-in-practice patterns,
+ * but it catches ALL classic ReDoS vectors. The trade-off is appropriate for a
+ * synchronous grep that runs on the daemon's main thread — a false-positive
+ * reject is far cheaper than a frozen event loop.
+ */
+export function isReDoSRisk(pattern: string): boolean {
+  // Strip character classes ([...]) since quantifiers inside them are literal
+  const withoutCharClasses = pattern.replace(/\[(?:\\.|[^\]\\])*\]/g, "");
+  // Collapse nested parentheses: ((x)) → (x) so inner quantifiers surface
+  let simplified = withoutCharClasses;
+  for (let i = 0; i < 5; i++) {
+    const next = simplified.replace(/\((\([^)]*\))\)/g, "$1");
+    if (next === simplified) break;
+    simplified = next;
+  }
+  // Detect: quantifier → optional whitespace → ) → quantifier
+  // Matches patterns like (x+)+, (x*)+, (x+)*, (x{2,})+, etc.
+  if (/[+*?}]\s*\)\s*[+*?{]/.test(simplified)) return true;
+  // Detect: ( → content with quantifier → ) → counted repetition {n}
+  // Matches patterns like (.*a){25}, (x+){3,}, etc.
+  if (/\([^)]*[+*][^)]*\)\s*\{/.test(simplified)) return true;
+  // Detect: ( → content with two+ quantifiers → ) → quantifier
+  // Matches patterns like (a+b+)+
+  if (/\([^)]*[+*?}][^)]*[+*?}][^)]*\)\s*[+*?{]/.test(simplified)) return true;
+  return false;
 }

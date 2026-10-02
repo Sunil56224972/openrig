@@ -156,6 +156,13 @@ export function filesRoutes(): Hono {
         contentType = "text/html; charset=utf-8";
       }
 
+      // Security hardening: compute defense-in-depth headers for active content
+      // types (text/html, image/svg+xml). Without these, a file written by a
+      // compromised agent and previewed by the operator executes arbitrary JS
+      // in the daemon's origin — a stored XSS that crosses the agent→operator
+      // trust boundary. See CWE-79.
+      const secHeaders = assetSecurityHeaders(contentType, resolved);
+
       // OPR.0.4.4.20 FR-5: byte-range support on THIS route only (iOS Safari
       // requires 206 + Accept-Ranges for media playback; 200-with-whole-file
       // is the documented iOS failure mode). Single-range form only.
@@ -184,6 +191,7 @@ export function filesRoutes(): Hono {
               "Content-Length": String(length),
               "Accept-Ranges": "bytes",
               "Cache-Control": "public, max-age=300",
+              ...secHeaders,
             },
           });
         } finally {
@@ -198,6 +206,7 @@ export function filesRoutes(): Hono {
           "Content-Type": contentType,
           "Accept-Ranges": "bytes",
           "Cache-Control": "public, max-age=300",
+          ...secHeaders,
         },
       });
     } catch (err) {
@@ -301,3 +310,45 @@ function inferContentType(absPath: string): string {
 
 // Re-export for the route-order discipline test in workflow-routes.
 export { resolveAllowedPath };
+
+/**
+ * Defense-in-depth security headers for the /api/files/asset endpoint.
+ *
+ * Active content types (text/html via ?render=1, image/svg+xml) can execute
+ * arbitrary JavaScript when navigated to in a browser. Without these headers,
+ * a file written by a compromised or prompt-injected AI agent and previewed
+ * by the operator would execute in the daemon's origin — a stored XSS that
+ * crosses the agent→operator trust boundary and grants the payload same-origin
+ * access to every daemon API endpoint. See CWE-79.
+ *
+ * Policy:
+ *   - text/html (render=1): strict CSP blocks inline scripts, external loads,
+ *     and eval. Only same-origin images and inline styles are permitted so
+ *     operator mockups still render visually.
+ *   - image/svg+xml: Content-Disposition: attachment forces a download instead
+ *     of inline rendering, neutralizing embedded <script> and event handlers.
+ *   - All responses: X-Content-Type-Options: nosniff prevents the browser from
+ *     MIME-sniffing a text/plain response into an executable type.
+ */
+export function assetSecurityHeaders(contentType: string, resolvedPath: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    "X-Content-Type-Options": "nosniff",
+  };
+
+  if (contentType.startsWith("text/html")) {
+    // Strict CSP for rendered HTML: block all scripts (inline, external, eval),
+    // allow only same-origin images and inline styles for layout fidelity.
+    headers["Content-Security-Policy"] =
+      "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'";
+    headers["X-Frame-Options"] = "DENY";
+  } else if (contentType === "image/svg+xml") {
+    // SVGs can embed <script> tags and event-handler attributes that execute
+    // when the browser navigates directly to the file. Force download to
+    // neutralize the vector while still allowing <img src="...svg"> embedding
+    // (browsers ignore Content-Disposition for <img> subrequests).
+    const basename = path.basename(resolvedPath);
+    headers["Content-Disposition"] = `attachment; filename="${basename}"`;
+  }
+
+  return headers;
+}
