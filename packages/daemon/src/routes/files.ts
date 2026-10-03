@@ -346,8 +346,11 @@ export function assetSecurityHeaders(contentType: string, resolvedPath: string):
     // when the browser navigates directly to the file. Force download to
     // neutralize the vector while still allowing <img src="...svg"> embedding
     // (browsers ignore Content-Disposition for <img> subrequests).
+    // Use RFC 5987 UTF-8 encoding so filenames with unicode (CJK, emoji, etc.)
+    // are transmitted safely instead of producing a malformed header.
     const basename = path.basename(resolvedPath);
-    headers["Content-Disposition"] = `attachment; filename="${basename}"`;
+    const encoded = encodeURIComponent(basename);
+    headers["Content-Disposition"] = `attachment; filename*=UTF-8''${encoded}`;
   }
 
   return headers;

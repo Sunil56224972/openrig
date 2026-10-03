@@ -41,7 +41,16 @@ describe("assetSecurityHeaders", () => {
 
   it("returns Content-Disposition: attachment for SVG to prevent script execution", () => {
     const headers = assetSecurityHeaders("image/svg+xml", "/workspace/diagram.svg");
-    expect(headers["Content-Disposition"]).toBe('attachment; filename="diagram.svg"');
+    expect(headers["Content-Disposition"]).toBe("attachment; filename*=UTF-8''diagram.svg");
+  });
+
+  it("encodes unicode SVG filenames with RFC 5987 so CJK/emoji names work", () => {
+    const headers = assetSecurityHeaders("image/svg+xml", "/workspace/图表.svg");
+    expect(headers["Content-Disposition"]).toContain("attachment");
+    expect(headers["Content-Disposition"]).toContain("filename*=UTF-8''");
+    // Verify the unicode is percent-encoded, not raw
+    expect(headers["Content-Disposition"]).not.toContain("图表");
+    expect(headers["Content-Disposition"]).toContain(encodeURIComponent("图表.svg"));
   });
 
   it("does NOT return Content-Disposition for non-SVG images", () => {
@@ -140,7 +149,7 @@ fetch('/api/files/roots').then(r => r.json()).then(data => {
     const disposition = res.headers.get("Content-Disposition");
     expect(disposition).toBeDefined();
     expect(disposition).toContain("attachment");
-    expect(disposition).toContain("xss-payload.svg");
+    expect(disposition).toContain("filename*=UTF-8''");
 
     // nosniff must be present
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
